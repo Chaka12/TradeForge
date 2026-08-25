@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Symbol {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  exchange  String   @default("SIM")
+  type      String   @default("stock")
+  createdAt DateTime @default(now())
+  bars      Bar[]
+}
+
+model Bar {
+  id        String   @id @default(cuid())
+  symbolId  String
+  symbol    Symbol   @relation(fields: [symbolId], references: [id], onDelete: Cascade)
+  timestamp Int
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    BigInt
+  timeframe String   @default("1D")
+
+  @@index([symbolId, timestamp])
+  @@index([symbolId, timeframe])
+}
+
+model Account {
+  id        String    @id @default(cuid())
+  name      String    @default("Default")
+  balance   Float     @default(100000)
+  currency  String    @default("USD")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  trades    Trade[]
+  orders    Order[]
+  deposits  Deposit[]
+}
+
+model Deposit {
+  id        String   @id @default(cuid())
+  accountId String
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  amount    Float
+  type      String   @default("deposit")
+  note      String?
+  createdAt DateTime @default(now())
+}
+
+model Trade {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  symbol      String
+  side        String
+  quantity    Float
+  entryPrice  Float
+  exitPrice   Float?
+  stopLoss    Float?
+  takeProfit  Float?
+  commission  Float    @default(0)
+  pnl         Float?
+  status      String   @default("open")
+  entryTime   Int
+  exitTime    Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([accountId, status])
+}
+
+model Order {
+  id         String   @id @default(cuid())
+  accountId  String
+  account    Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  symbol     String
+  side       String
+  type       String
+  quantity   Float
+  price      Float?
+  stopPrice  Float?
+  status     String   @default("pending")
+  filledQty  Float    @default(0)
+  createdAt  Int
+  updatedAt  DateTime @updatedAt
+
+  @@index([accountId, status])
+}
+
+model IndicatorPlugin {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  code        String
+  parameters  String   @default("{}")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ChartTemplate {
+  id        String   @id @default(cuid())
+  name      String
+  symbol    String?
+  config    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TradeJournal {
+  id        String   @id @default(cuid())
+  tradeId   String?
+  title     String
+  notes     String
+  tags      String   @default("[]")
+  rating    Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
