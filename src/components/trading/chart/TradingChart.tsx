@@ -625,13 +625,7 @@ export default function TradingChart() {
     const canvas = drawingCanvasRef.current;
     const canvasWidth = canvas ? canvas.getBoundingClientRect().width : 800;
     const storeBars = useChartStore.getState().bars;
-    // During replay, use visible bars for consistent extrapolation past playhead
-    const rewind = useChartStore.getState().isRewindMode;
-    const idx = useChartStore.getState().currentBarIndex;
-    const extrapolationBars = rewind && idx >= 0
-      ? storeBars.slice(0, Math.min(idx + 1, storeBars.length))
-      : storeBars;
-    return drawingToScreenPts(drawing, ts, ms, canvasWidth, extrapolationBars);
+    return drawingToScreenPts(drawing, ts, ms, canvasWidth, storeBars);
   }, []);
 
   // ---- Shape interaction: pointer down on canvas ----
@@ -734,39 +728,22 @@ export default function TradingChart() {
     const ts = chart.timeScale();
     const canvasWidth = canvasRect.width;
 
-    // Forward extrapolation: time → screen X (handles points beyond chart data)
-    const storeBars = useChartStore.getState().bars;
-    const rewind = useChartStore.getState().isRewindMode;
-    const rIdx = useChartStore.getState().currentBarIndex;
-    const visBars = rewind && rIdx >= 0
-      ? storeBars.slice(0, Math.min(rIdx + 1, storeBars.length))
-      : storeBars;
-    const extrapolateX = (t: number): number | null => {
-      const native = ts.timeToCoordinate(t as Time);
-      if (native !== null) return Number(native);
-      if (visBars.length < 2) return null;
-      const fBar = visBars[0], lBar = visBars[visBars.length - 1];
-      const fX = ts.timeToCoordinate(fBar.time as Time);
-      const lX = ts.timeToCoordinate(lBar.time as Time);
-      if (fX === null || lX === null) return null;
-      const tr = lBar.time - fBar.time;
-      if (tr === 0) return null;
-      return Number(fX) + (t - fBar.time) * ((Number(lX) - Number(fX)) / tr);
-    };
-
     const drawing = useChartStore.getState().drawings.find((d) => d.id === drag.drawingId);
     if (!drawing) return;
 
     // Helper: convert screen coord to time/price
     const screenToTimePrice = (screenX: number, screenY: number): { time: number; price: number } | null => {
+      // For time: try native first, then extrapolate using bar data
       let timeVal: number | null = null;
       const nativeTime = ts.coordinateToTime(screenX);
       if (nativeTime !== null) {
         timeVal = typeof nativeTime === 'number' ? nativeTime : new Date(nativeTime as string).getTime() / 1000;
       } else {
-        if (visBars.length >= 2) {
-          const firstBar = visBars[0];
-          const lastBar = visBars[visBars.length - 1];
+        // Extrapolate using first/last bar timestamps (correct approach)
+        const storeBars = useChartStore.getState().bars;
+        if (storeBars.length >= 2) {
+          const firstBar = storeBars[0];
+          const lastBar = storeBars[storeBars.length - 1];
           const firstX = ts.timeToCoordinate(firstBar.time as Time);
           const lastX = ts.timeToCoordinate(lastBar.time as Time);
           if (firstX !== null && lastX !== null) {
@@ -805,11 +782,11 @@ export default function TradingChart() {
         const timePoint = isTopRight ? newPoints[1] : newPoints[0];
         const pricePoint = isTopRight ? newPoints[0] : newPoints[1];
 
-        const origTimeCoord = extrapolateX(timePoint.time);
+        const origTimeCoord = ts.timeToCoordinate(timePoint.time as Time);
         const origPriceCoord = ms.priceToCoordinate(pricePoint.price);
         if (origTimeCoord === null || origPriceCoord === null) return;
 
-        const newTimeCoord = origTimeCoord + dx;
+        const newTimeCoord = Number(origTimeCoord) + dx;
         const newPriceCoord = Number(origPriceCoord) + dy;
         const converted = screenToTimePrice(newTimeCoord, newPriceCoord);
         if (!converted) return;
@@ -817,11 +794,11 @@ export default function TradingChart() {
         timePoint.time = converted.time;
         pricePoint.price = converted.price;
       } else {
-        const origTimeCoord = extrapolateX(newPoints[ptIdx].time);
+        const origTimeCoord = ts.timeToCoordinate(newPoints[ptIdx].time as Time);
         const origPriceCoord = ms.priceToCoordinate(newPoints[ptIdx].price);
         if (origTimeCoord === null || origPriceCoord === null) return;
 
-        const newTimeCoord = origTimeCoord + dx;
+        const newTimeCoord = Number(origTimeCoord) + dx;
         const newPriceCoord = Number(origPriceCoord) + dy;
         const converted = screenToTimePrice(newTimeCoord, newPriceCoord);
         if (!converted) return;
@@ -850,11 +827,11 @@ export default function TradingChart() {
       }
     } else if (drag.mode === 'body') {
       const newPoints = drag.origPoints.map((origPt) => {
-        const origX = extrapolateX(origPt.time);
+        const origX = ts.timeToCoordinate(origPt.time as Time);
         const origY = ms.priceToCoordinate(origPt.price);
         if (origX === null || origY === null) return { ...origPt };
 
-        const newX = origX + dx;
+        const newX = Number(origX) + dx;
         const newY = Number(origY) + dy;
         const converted = screenToTimePrice(newX, newY);
         if (!converted) return { ...origPt };
@@ -900,39 +877,26 @@ export default function TradingChart() {
     dragStateRef.current = null;
   }, [updateDrawing]);
 
-  // ---- Double-click: text editing + selection toggle ----
+  // ---- Double-click: text editing ----
   const handleCanvasDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvasRect = drawingCanvasRef.current?.getBoundingClientRect();
     if (!canvasRect) return;
     const mx = e.clientX - canvasRect.left;
     const my = e.clientY - canvasRect.top;
+
     const hitId = hitTestDrawingsOnChart(mx, my);
-    const currentSel = useChartStore.getState().selectedDrawingId;
+    if (!hitId) return;
 
-    if (hitId) {
-      // Text shape → open editor
-      const drawing = useChartStore.getState().drawings.find((d) => d.id === hitId);
-      if (drawing?.type === 'text') {
-        const pts = getDrawingScreenPts(drawing);
-        if (pts.length >= 1) {
-          setEditingTextId(hitId);
-          setEditingTextValue(drawing.text || '');
-          setEditingTextPos({ x: pts[0].x, y: pts[0].y });
-          useChartStore.getState().setSelectedDrawingId(hitId);
-        }
-        return;
-      }
-      // Non-text shape: double-click on selected → deselect, on different → select
-      if (hitId === currentSel) {
-        useChartStore.getState().setSelectedDrawingId(null);
-      } else {
-        useChartStore.getState().setSelectedDrawingId(hitId);
-      }
-      return;
+    const drawing = useChartStore.getState().drawings.find((d) => d.id === hitId);
+    if (!drawing || drawing.type !== 'text') return;
+
+    const pts = getDrawingScreenPts(drawing);
+    if (pts.length >= 1) {
+      setEditingTextId(hitId);
+      setEditingTextValue(drawing.text || '');
+      setEditingTextPos({ x: pts[0].x, y: pts[0].y });
+      useChartStore.getState().setSelectedDrawingId(hitId);
     }
-
-    // Double-click on empty canvas → deselect
-    useChartStore.getState().setSelectedDrawingId(null);
   }, [getDrawingScreenPts]);
 
   const commitTextEdit = useCallback(() => {
@@ -1003,19 +967,16 @@ export default function TradingChart() {
         const ms = mainSeriesRef.current; if (!ms) return;
         const chart = chartRef.current; if (!chart) return;
         const x = param.point.x, y = param.point.y;
-
-        // time/price may be null when clicking beyond chart data (past last bar)
         const time = chart.timeScale().coordinateToTime(x);
         const price = ms.coordinateToPrice(y);
-        const timeVal = time !== null
-          ? (typeof time === 'number' ? time : new Date(time as string).getTime() / 1000)
-          : null;
+        if (time === null || price === null) return;
+        const timeVal = typeof time === 'number' ? time : new Date(time as string).getTime() / 1000;
 
         const tool = activeDrawingToolRef.current;
         const now = Date.now();
 
-        // ── REWIND MODE: click to place vertical rule (needs valid time) ──
-        if (isRewindModeRef.current && !tool && timeVal !== null) {
+        // ── REWIND MODE: click to place vertical rule (only when no tool) ──
+        if (isRewindModeRef.current && !tool) {
           const storeBars = useChartStore.getState().bars;
           let clickedIdx = -1;
           let minDist = Infinity;
@@ -1031,9 +992,8 @@ export default function TradingChart() {
           return;
         }
 
-        // ── Drawing tool active (needs valid time/price to place points) ──
+        // ── Drawing tool active ──
         if (tool) {
-          if (timeVal === null || price === null) return;
           // R:R tool needs 3 clicks (entry, SL, TP)
           if (tool === 'risk_reward') {
             drawingPointsRef.current.push({ time: timeVal, price });
@@ -1093,29 +1053,19 @@ export default function TradingChart() {
           return;
         }
 
-        // ── Selection (screen-coords only — works even beyond chart data) ──
-        const isDblClick = now - lastClickTimeRef.current < 350;
-        const clickTime = now;
-        lastClickTimeRef.current = now;
-
-        if (isDblClick) {
-          const hitId = hitTestDrawingsOnChart(x, y);
-          const currentSel = useChartStore.getState().selectedDrawingId;
-          if (hitId && hitId === currentSel) {
-            setSelectedDrawingId(null);
-          } else if (hitId) {
-            setSelectedDrawingId(hitId);
-          } else {
-            setSelectedDrawingId(null);
-          }
+        // ── No tool — selection via single click (with double-click guard) ──
+        if (now - lastClickTimeRef.current < 350) {
+          lastClickTimeRef.current = 0;
           return;
         }
+        lastClickTimeRef.current = now;
 
         setTimeout(() => {
-          if (lastClickTimeRef.current !== clickTime) return;
-          const hitId = hitTestDrawingsOnChart(x, y);
-          if (hitId) setSelectedDrawingId(hitId);
-          else setSelectedDrawingId(null);
+          if (Date.now() - lastClickTimeRef.current > 400) {
+            const hitId = hitTestDrawingsOnChart(x, y);
+            if (hitId) setSelectedDrawingId(hitId);
+            else setSelectedDrawingId(null);
+          }
         }, 400);
       });
 
@@ -1135,16 +1085,10 @@ export default function TradingChart() {
     const storeDrawings = useChartStore.getState().drawings;
     const tf = useChartStore.getState().timeframe;
     const storeBars = useChartStore.getState().bars;
-    // During replay, use visible bars for consistent extrapolation past playhead
-    const rewind = useChartStore.getState().isRewindMode;
-    const idx = useChartStore.getState().currentBarIndex;
-    const extrapolationBars = rewind && idx >= 0
-      ? storeBars.slice(0, Math.min(idx + 1, storeBars.length))
-      : storeBars;
     for (let i = storeDrawings.length - 1; i >= 0; i--) {
       const d = storeDrawings[i];
       if (d.visibleTimeframes && d.visibleTimeframes.length > 0 && !d.visibleTimeframes.includes(tf)) continue;
-      const pts = drawingToScreenPts(d, ts, ms, canvasWidth, extrapolationBars);
+      const pts = drawingToScreenPts(d, ts, ms, canvasWidth, storeBars);
       if (hitTestDrawing(mx, my, [pts], d)) return d.id;
     }
     return null;
@@ -1287,12 +1231,6 @@ export default function TradingChart() {
       const storeBars = useChartStore.getState().bars;
       const rewind = useChartStore.getState().isRewindMode;
       if (rewind && idx >= 0 && idx < storeBars.length) playheadTime = storeBars[idx].time;
-      // During replay, use only visible bars for extrapolation so shapes can project past the playhead.
-      // The first/last visible bars are guaranteed to be in the chart series, so
-      // timeToCoordinate succeeds and linear extrapolation extends beyond the playhead.
-      const extrapolationBars = rewind && idx >= 0
-        ? storeBars.slice(0, Math.min(idx + 1, storeBars.length))
-        : storeBars;
       renderDrawings({
         canvas, chart, mainSeries: ms,
         drawings,
@@ -1300,7 +1238,7 @@ export default function TradingChart() {
         playheadTime,
         selectedDrawingId,
         currentTf: timeframe,
-        bars: extrapolationBars,
+        bars: storeBars,
         dragPreviewDrawing: dragPreviewRef.current,
       });
     };
